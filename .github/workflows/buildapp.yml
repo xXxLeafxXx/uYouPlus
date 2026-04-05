@@ -1,5 +1,6 @@
 # Original idea by @ISnackable. Thanks to him for handling the hardest parts!
 # https://github.com/ISnackable/CercubePlus/blob/main/.github/workflows/Build.yml
+# Improved version with better error handling and comments
 
 name: Build and Release uYouPlus
 
@@ -7,38 +8,38 @@ on:
   workflow_dispatch:
     inputs:
       uyou_version:
-        description: "The version of uYou"
+        description: "Версия uYou (например, 3.0.4)"
         default: "3.0.4"
         required: true
         type: string
       uyou_url:
-        description: "The URL for download uYou"
-        default: "https://something.url/uyou.deb"
+        description: "Ссылка на uYou .deb файл (опционально)"
+        default: "https://github.com/dayanch96/uYou/releases/download/3.0.4/com.dvntm.uyou_3.0.4_iphoneos-arm.deb"
         required: false
         type: string
       decrypted_youtube_url:
-        description: "Direct URL to the decrypted YouTube ipa. The version of YouTube will be detected automatically."
+        description: "Прямая ссылка на расшифрованную YouTube .ipa (ОБЯЗАТЕЛЬНО)"
         default: ""
         required: true
         type: string
       bundle_id:
-        description: "Modify the bundle ID. Not recommended"
+        description: "Bundle ID приложения (не меняйте, если не уверены)"
         default: "com.google.ios.youtube"
         required: true
         type: string
       app_name:
-        description: "Modify the name of the app on the Home Screen. Not recommended"
+        description: "Название приложения на экране (не меняйте, если не уверены)"
         default: "YouTube"
         required: true
         type: string
       create_release:
-        description: "Create a draft release"
+        description: "Создать черновик релиза после сборки"
         default: true
         required: false
         type: boolean
       upload_artifact:
-        description: "Upload Artifact"
-        default: false
+        description: "Загрузить .ipa как артефакт (для скачивания без релиза)"
+        default: true
         required: false
         type: boolean
 
@@ -54,27 +55,30 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout Main
+      # 1. Скачиваем ваш репозиторий
+      - name: 📦 Checkout Main
         uses: actions/checkout@v4.2.1
         with:
           path: main
           submodules: recursive
 
-      - name: Caching brew dependencies
+      # 2. Устанавливаем необходимые инструменты
+      - name: 🍺 Caching brew dependencies
         id: brew_cache
         uses: tecolicom/actions-use-homebrew-tools@v1.2
         with:
           tools: ldid dpkg make
           cache: yes
 
-      - name: Install Dependencies
+      - name: 📦 Install Dependencies (if not cached)
         if: steps.brew_cache.outputs.cache-hit != 'true'
         run: brew install ldid dpkg make
 
-      - name: Set PATH environment variable
+      - name: ⚙️ Set PATH environment variable
         run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
 
-      - name: Setup Theos
+      # 3. Настраиваем Theos (инструмент для сборки твиков)
+      - name: 🔧 Setup Theos
         uses: actions/checkout@v4.2.1
         with:
           repository: theos/theos
@@ -82,7 +86,8 @@ jobs:
           path: theos
           submodules: recursive
 
-      - name: Caching SDK
+      # 4. Кэшируем SDK (чтобы не скачивать каждый раз)
+      - name: 💾 Caching SDK
         id: SDK
         uses: actions/cache@v4
         env:
@@ -91,17 +96,20 @@ jobs:
           path: theos/sdks/
           key: ${{ env.cache-name }}
 
-      - name: Download iOS 16.5 SDK
+      - name: 📥 Download iOS 16.5 SDK (if not cached)
         if: steps.SDK.outputs.cache-hit != 'true'
         run: |
+          echo "==> Скачиваем iOS 16.5 SDK..."
           git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git && cd sdks
           git sparse-checkout set --no-cone iPhoneOS16.5.sdk
           git checkout
           mv *.sdk $THEOS/sdks
+          echo "==> SDK установлен в: $THEOS/sdks/"
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Setup Theos Jailed
+      # 5. Настраиваем Theos Jailed (для работы без джейлбрейка)
+      - name: 🔐 Setup Theos Jailed
         uses: actions/checkout@v4.2.1
         with:
           repository: qnblackcat/theos-jailed
@@ -109,48 +117,102 @@ jobs:
           path: theos-jailed
           submodules: recursive
 
-      - name: Install Theos Jailed
+      - name: 🔧 Install Theos Jailed
         run: |
+          echo "==> Устанавливаем Theos Jailed..."
           ./theos-jailed/install
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Prepare YouTube iPA
+      # 6. Скачиваем и подготавливаем YouTube IPA
+      - name: 🎬 Prepare YouTube iPA
         id: prepare_youtube
         run: |
+          echo "==> Скачиваем YouTube IPA..."
           wget "$YOUTUBE_URL" --no-verbose -O main/YouTube.ipa
+          
           cd ${{ github.workspace }}/main
+          
+          echo "==> Распаковываем IPA..."
           mv YouTube.ipa YouTube.zip
           unzip -q YouTube.zip
+          
+          echo "==> Определяем версию YouTube..."
           youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
-          echo "==> YouTube v$youtube_version downloaded!"
-          sed -i '' "17s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
+          echo "==> ✅ YouTube v$youtube_version готов!"
+          
+          # Автоматически находим и заменяем строку с версией в Makefile
+          if grep -q "^YOUTUBE_VERSION ?=" Makefile; then
+            sed -i '' "s|^YOUTUBE_VERSION ?=.*|YOUTUBE_VERSION = ${youtube_version}|g" Makefile
+            echo "==> ✅ Обновлено YOUTUBE_VERSION в Makefile"
+          else
+            echo "==> ⚠️ Предупреждение: строка YOUTUBE_VERSION не найдена в Makefile"
+          fi
+          
           echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
 
         env:
           THEOS: ${{ github.workspace }}/theos
           YOUTUBE_URL: ${{ inputs.decrypted_youtube_url }}
 
-      - name: Fix compiling & Build Package
+      # 7. Скачиваем и внедряем uYou (если указана ссылка)
+      - name: 🎨 Integrate uYou Tweak
+        if: ${{ inputs.uyou_url != '' }}
+        run: |
+          echo "==> Скачиваем uYou..."
+          wget "$UYOU_URL" --no-verbose -O uyou.deb
+          
+          echo "==> Распаковываем uYou..."
+          dpkg -x uyou.deb uyou_extracted
+          
+          echo "==> Копируем файлы uYou в проект..."
+          cp -r uyou_extracted/var/jb/Library/Application\ Support/uYou/* main/uYouPlus/
+          
+          echo "==> ✅ uYou интегрирован!"
+        env:
+          UYOU_URL: ${{ inputs.uyou_url }}
+
+      # 8. Собираем финальный пакет
+      - name: 🔨 Build Package
         id: build_package
         run: |
+          echo "==> Подготовка к сборке..."
           mkdir -p theos/lib/iphone/rootless
           cd ${{ github.workspace }}/main
-          sed -i '' "27s#.*#BUNDLE_ID = ${{ env.BUNDLE_ID }}#g" Makefile
-          sed -i '' "26s#.*#DISPLAY_NAME = ${{ env.APP_NAME }}#g" Makefile
+          
+          # Обновляем Bundle ID и название приложения (безопасная замена)
+          if grep -q "^BUNDLE_ID ?=" Makefile; then
+            sed -i '' "s|^BUNDLE_ID ?=.*|BUNDLE_ID = ${{ env.BUNDLE_ID }}|g" Makefile
+            echo "==> ✅ Bundle ID установлен: ${{ env.BUNDLE_ID }}"
+          fi
+          
+          if grep -q "^DISPLAY_NAME ?=" Makefile; then
+            sed -i '' "s|^DISPLAY_NAME ?=.*|DISPLAY_NAME = ${{ env.APP_NAME }}|g" Makefile
+            echo "==> ✅ Название приложения: ${{ env.APP_NAME }}"
+          fi
+          
+          echo "==> Запускаем сборку (это может занять 10-20 минут)..."
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
-          echo "package=$(ls -t packages | head -n1)" >>$GITHUB_OUTPUT
-          echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
-          echo -e "==> \033[1mBundle ID: ${{ env.BUNDLE_ID }}\033[0m"
-
+          
+          # Проверяем, что файл создан
+          if [ -f packages/*.ipa ]; then
+            package_name=$(ls -t packages/*.ipa | head -n1 | xargs basename)
+            echo "package=packages/$package_name" >> $GITHUB_OUTPUT
+            echo "==> ✅ Сборка завершена! Файл: $package_name"
+            echo -e "==> 🔐 SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
+          else
+            echo "==> ❌ ОШИБКА: Файл .ipa не был создан!"
+            ls -la packages/
+            exit 1
+          fi
         env:
           THEOS: ${{ github.workspace }}/theos
           UYOU_VERSION: ${{ inputs.uyou_version }}
-          UYOU_URL: ${{ inputs.uyou_url }}
           BUNDLE_ID: ${{ inputs.bundle_id }}
           APP_NAME: ${{ inputs.app_name }}
 
-      - name: Upload Artifact
+      # 9. Загружаем артефакт (опционально)
+      - name: ⬆️ Upload Artifact
         if: ${{ inputs.upload_artifact }}
         uses: actions/upload-artifact@v4.4.3
         env:
@@ -158,10 +220,13 @@ jobs:
           YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
         with:
           name: uYouPlus_${{ env.YOUTUBE_VERSION }}_${{ env.UYOU_VERSION }}
-          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
+          path: ${{ steps.build_package.outputs.package }}
           if-no-files-found: error
+          retention-days: 7
 
-      - name: Create Release
+      # 10. Создаём релиз на GitHub (опционально)
+      - name: 🚀 Create Release
+        if: ${{ inputs.create_release }}
         id: create_release
         uses: qnblackcat/action-gh-release@master
         env:
@@ -171,6 +236,15 @@ jobs:
           DRAFT: ${{ inputs.create_release }}
         with:
           tag_name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
-          name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
+          name: uYouPlus v${{ env.YOUTUBE_VERSION }} (uYou ${{ env.UYOU_VERSION }})
+          body: |
+            ## uYouPlus Build
+            - YouTube: v${{ env.YOUTUBE_VERSION }}
+            - uYou: v${{ env.UYOU_VERSION }}
+            - Сборка: #${{ github.run_number }}
+            - Дата: ${{ github.event.repository.updated_at }}
+            
+            > ⚠️ Этот файл собран автоматически. Используйте на свой страх и риск.
           files: main/packages/*.ipa
-          draft: ${{ env.DRAFT }}
+          draft: true
+          prerelease: false
